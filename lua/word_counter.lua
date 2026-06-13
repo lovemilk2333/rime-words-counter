@@ -90,6 +90,23 @@ end
 local json_path = config_path .. sep .. "config.json"
 local state_path = config_path .. sep .. "state.json"
 
+-- 分片名称保留字（与配置文件/目录冲突时自动重命名）
+local reserved_split_names = {
+    ["config"] = true,
+    ["config.json"] = true,
+    ["state"] = true,
+    ["state.json"] = true,
+    ["sync"] = true,
+    ["dev_"] = true,
+}
+
+local function sanitize_split_name(name)
+    if reserved_split_names[name] or name:match("^dev_") then
+        return name .. "_split"
+    end
+    return name
+end
+
 local config = {
     machine_id = "",
     sync_dir = "$config_path/sync",
@@ -125,7 +142,7 @@ local function load_config_file()
         rewrite_required = true
     end
 
-    -- 提取 count_rates 字典
+    -- 提取 count_rates 字典（完全替换默认值）
     local rates_block = content:match('"count_rates"%s*:%s*{([^}]+)}')
     if rates_block then
         config.count_rates = {}
@@ -141,7 +158,8 @@ local function load_config_file()
     if split_block then
         config.state_split = {}
         for k, v in split_block:gmatch('"([^"]+)"%s*:%s*"([^"]+)"') do
-            config.state_split[k] = v
+            local safe_name = sanitize_split_name(k)
+            config.state_split[safe_name] = v
         end
     end
 
@@ -150,7 +168,8 @@ local function load_config_file()
     if retention_block then
         config.state_retention = {}
         for k, v in retention_block:gmatch('"([^"]+)"%s*:%s*"([^"]+)"') do
-            config.state_retention[k] = v
+            local safe_name = sanitize_split_name(k)
+            config.state_retention[safe_name] = v
         end
     end
 
@@ -742,8 +761,6 @@ end
 
 -- ==================== 9. Rime 回调入口 ====================
 local processor_state = {
-    last_preedit_len = 0,
-    backspace_pressed = false,
     errors_buffered = 0,
 }
 
@@ -814,47 +831,14 @@ local function on_commit(context)
 end
 
 local function word_counter_processor(key, env)
-    local context = env.engine.context
     local repr = key:repr()
 
     if repr == "BackSpace" or repr == "Delete" then
-        local preedit = context:get_preedit()
-        local current_len = 0
-        if preedit and preedit.text then
-            current_len = utf8.len(preedit.text)
-        end
-
-        if current_len > 0 then
-            -- preedit 内删除：记录长度差值
-            processor_state.errors_buffered = processor_state.errors_buffered +
-                math.max(0, processor_state.last_preedit_len - current_len)
-        else
-            -- 无 preedit 时的退格/删除：假设删除 1 个已提交字符
-            processor_state.errors_buffered = processor_state.errors_buffered + 1
-        end
-
-        processor_state.last_preedit_len = current_len
-        return 1
+        processor_state.errors_buffered = processor_state.errors_buffered + 1
+        return 2  -- kNoop: 让引擎继续处理退格
     end
 
-    -- 更新 preedit 长度追踪
-    local preedit = context:get_preedit()
-    if preedit and preedit.text then
-        local current_len = utf8.len(preedit.text)
-        if processor_state.backspace_pressed then
-            -- 退格后的长度变化
-            local delta = processor_state.last_preedit_len - current_len
-            if delta > 0 then
-                processor_state.errors_buffered = processor_state.errors_buffered + delta
-            end
-            processor_state.backspace_pressed = false
-        end
-        processor_state.last_preedit_len = current_len
-    else
-        processor_state.last_preedit_len = 0
-    end
-
-    return 1
+    return 2  -- kNoop: 不干扰其他按键
 end
 
 function init(env)
@@ -894,5 +878,6 @@ return {
         Storage = Storage,
         storage = function() return storage end,
         processor_state = processor_state,
+        sanitize_split_name = sanitize_split_name,
     }
 }

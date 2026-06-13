@@ -75,7 +75,7 @@ patch:
 | `sync_dir` | `$config_path/sync` | 多设备同步文件夹路径。`$config_path` 会被动态替换为上述系统配置目录的绝对路径；也可直接填写绝对路径 |
 | `commit_threshold` | `32` | 每累计多少次上屏触发一次同步文件导出 |
 | `history_threshold` | `16` | 闲时清理时保留的最大历史快照数 |
-| `count_rates` | 见下方 | 多维度加权统计规则 |
+| `count_rates` | `{ "cjk": 1, "ascii": 0.33 }` | 多维度加权统计规则（用户配置会**完全替换**默认值，需显式写出所有需要的键） |
 | `state_split` | `{}` | 按时间粒度分片存储的配置，键为分片名称，值为时间粒度 |
 | `state_retention` | `{}` | 各分片的保留期限，超期文件自动清理 |
 

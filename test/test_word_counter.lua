@@ -1131,23 +1131,55 @@ do
 
     local ps = I.processor_state
     -- 初始状态
-    assert_eq("初始 last_preedit_len", ps.last_preedit_len, 0)
     assert_eq("初始 errors_buffered", ps.errors_buffered, 0)
 
-    -- 模拟退格前状态
-    ps.last_preedit_len = 5
-    ps.errors_buffered = 0
-
-    -- 模拟退格后 preedit 缩短到 3（删除 2 字符）
-    local delta = ps.last_preedit_len - 3
-    ps.errors_buffered = ps.errors_buffered + delta
-    ps.last_preedit_len = 3
-
-    assert_eq("退格后 errors_buffered", ps.errors_buffered, 2)
-
-    -- 模拟无 preedit 时退格（删除已提交文本）
+    -- 模拟退格：每次 BackSpace/Delete 计数 +1
     ps.errors_buffered = ps.errors_buffered + 1
-    assert_eq("无 preedit 退格后 errors_buffered", ps.errors_buffered, 3)
+    assert_eq("退格 1 次", ps.errors_buffered, 1)
+
+    ps.errors_buffered = ps.errors_buffered + 1
+    assert_eq("退格 2 次", ps.errors_buffered, 2)
+end
+
+-- ----------------------------------------------------------
+print("\n[32] 分片名称冲突自动重命名")
+-- ----------------------------------------------------------
+do
+    reset_config()
+
+    local custom_config = [[{
+    "machine_id": "test-rename-001",
+    "sync_dir": "$config_path/sync",
+    "commit_threshold": 32,
+    "history_threshold": 16,
+    "count_rates": { "cjk": 1 },
+    "state_split": {
+        "config": "1month",
+        "state": "1day",
+        "sync": "1week",
+        "dev_test": "1month",
+        "monthly": "1month"
+    },
+    "state_retention": {
+        "config": "24months",
+        "monthly": "12months"
+    }
+}]]
+    write_file(config_path .. sep .. "config.json", custom_config)
+    I.load_config_file()
+
+    -- 冲突的名称应被自动重命名
+    assert_eq("config -> config_split", I.config.state_split["config_split"], "1month")
+    assert_eq("state -> state_split", I.config.state_split["state_split"], "1day")
+    assert_eq("sync -> sync_split", I.config.state_split["sync_split"], "1week")
+    assert_eq("dev_test -> dev_test_split", I.config.state_split["dev_test_split"], "1month")
+
+    -- 不冲突的名称保持不变
+    assert_eq("monthly 不变", I.config.state_split["monthly"], "1month")
+
+    -- state_retention 也应同步重命名
+    assert_eq("retention config -> config_split", I.config.state_retention["config_split"], "24months")
+    assert_eq("retention monthly 不变", I.config.state_retention["monthly"], "12months")
 end
 
 -- ==================== 测试结果汇总 ====================
