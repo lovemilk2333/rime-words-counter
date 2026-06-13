@@ -21,7 +21,7 @@
 
 ### 第 2 步：配置输入法方案
 
-在 Rime 用户文件夹中创建或打开 `*_custom.yaml`（如 `luna_pinyin_custom.yaml`），使用补靪指令添加处理器：
+在 Rime 用户文件夹中创建或打开 `*.custom.yaml`（如 `luna_pinyin.custom.yaml`），使用补靪指令添加处理器：
 
 ```yaml
 patch:
@@ -121,4 +121,4 @@ bash test/run_tests.sh
 
 ## 许可证
 
-BSD 3-Clause License
+[BSD 3-Clause License](./LICENSE)
