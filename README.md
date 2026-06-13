@@ -21,13 +21,14 @@
 
 ### 第 2 步：配置输入法方案
 
-打开你正在使用的输入法方案文件（如 `*.schema.yaml`），在 `engine` → `processors` 下添加：
+在 Rime 用户文件夹中创建或打开 `*_custom.yaml`（如 `luna_pinyin_custom.yaml`），使用补靪指令添加处理器：
 
 ```yaml
-engine:
-  processors:
-    - lua_processor@*word_counter  # 星号后面不要带空格
+patch:
+  "engine/processors/@next": lua_processor@*word_counter
 ```
+
+> `@next` 表示追加到列表末尾。若需指定位置，可使用 `@before <下標>` 或 `@after <下標>`（下标从 0 开始，末位可简写为 `@last`）。详见 [用补靪指令修改列表](https://github.com/rime/home/wiki/Configuration#用補靪指令修改列表)。
 
 ### 第 3 步：重新部署
 
