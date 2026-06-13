@@ -95,8 +95,12 @@ local config = {
     sync_dir = "$config_path/sync",
     commit_threshold = 32,
     history_threshold = 16,
-    count_rates = { cjk = 1, ascii = 0.33 }
+    count_rates = { cjk = 1, ascii = 0.33 },
+    state_split = {},
+    state_retention = {}
 }
+
+local storage  -- forward declaration
 
 -- 简易 JSON 解析（剥离出 key-value 与 count_rates 内部字典）
 local function load_config_file()
@@ -125,13 +129,33 @@ local function load_config_file()
     local rates_block = content:match('"count_rates"%s*:%s*{([^}]+)}')
     if rates_block then
         config.count_rates = {}
-        -- 改进的匹配模式，支持键中包含特殊字符（如正则表达式）
         for k, v in rates_block:gmatch('"([^"]*)"[%s]*:[%s]*([%d%.]+)') do
             if k ~= "" then
                 config.count_rates[k] = tonumber(v)
             end
         end
     end
+
+    -- 提取 state_split 字典
+    local split_block = content:match('"state_split"%s*:%s*{([^}]+)}')
+    if split_block then
+        config.state_split = {}
+        for k, v in split_block:gmatch('"([^"]+)"%s*:%s*"([^"]+)"') do
+            config.state_split[k] = v
+        end
+    end
+
+    -- 提取 state_retention 字典
+    local retention_block = content:match('"state_retention"%s*:%s*{([^}]+)}')
+    if retention_block then
+        config.state_retention = {}
+        for k, v in retention_block:gmatch('"([^"]+)"%s*:%s*"([^"]+)"') do
+            config.state_retention[k] = v
+        end
+    end
+
+    -- 初始化 storage
+    storage = Storage.new("json")
 
     -- 如果是初次创建或缺失 UUID，持久化配置
     if not f or rewrite_required then
@@ -141,6 +165,17 @@ local function load_config_file()
             for k, v in pairs(config.count_rates) do
                 table.insert(rates_json, string.format('        "%s": %s', k, tostring(v)))
             end
+
+            local split_json = {}
+            for k, v in pairs(config.state_split) do
+                table.insert(split_json, string.format('        "%s": "%s"', k, v))
+            end
+
+            local retention_json = {}
+            for k, v in pairs(config.state_retention) do
+                table.insert(retention_json, string.format('        "%s": "%s"', k, v))
+            end
+
             local json_str = string.format([[{
     "machine_id": "%s",
     "sync_dir": "%s",
@@ -148,8 +183,17 @@ local function load_config_file()
     "history_threshold": %d,
     "count_rates": {
 %s
+    },
+    "state_split": {
+%s
+    },
+    "state_retention": {
+%s
     }
-}]], config.machine_id, config.sync_dir, config.commit_threshold, config.history_threshold, table.concat(rates_json, ",\n"))
+}]], config.machine_id, config.sync_dir, config.commit_threshold, config.history_threshold,
+    table.concat(rates_json, ",\n"),
+    table.concat(split_json, ",\n"),
+    table.concat(retention_json, ",\n"))
             f:write(json_str)
             f:close()
         end
@@ -166,13 +210,14 @@ end
 local save_state  -- forward declaration
 
 local function load_state()
-    local state = { total = 0, counts = {}, processed_files = {} }
+    local state = { total = 0, counts = {}, processed_files = {}, errors = 0 }
     local f = io.open(state_path, "r")
     if f then
         local content = f:read("*a")
         f:close()
         
         state.total = tonumber(content:match('"total"%s*:%s*([%d%.]+)')) or 0
+        state.errors = tonumber(content:match('"errors"%s*:%s*(%d+)')) or 0
         
         local counts_block = content:match('"counts"%s*:%s*{([^}]+)}')
         if counts_block then
@@ -216,13 +261,14 @@ save_state = function(state)
         
         local content = string.format([[{
     "total": %s,
+    "errors": %d,
     "counts": {
 %s
     },
     "processed_files": {
 %s
     }
-}]], tostring(state.total), table.concat(counts_json, ",\n"), table.concat(files_json, ",\n"))
+}]], tostring(state.total), state.errors or 0, table.concat(counts_json, ",\n"), table.concat(files_json, ",\n"))
         f:write(content)
         f:close()
     end
@@ -284,6 +330,173 @@ end
 -- ==================== 5. 通用工具函数 ====================
 local function get_file_name_only(path)
     return path:match("^.*" .. sep .. "([^" .. sep .. "]+)$") or path
+end
+
+local function sum_table(t)
+    local s = 0
+    for _, v in pairs(t) do s = s + v end
+    return s
+end
+
+-- ==================== 5.1 时间粒度解析 ====================
+local period_patterns = {
+    { pattern = "^(%d+)hour[s]?$",  unit = "hour"  },
+    { pattern = "^(%d+)day[s]?$",   unit = "day"   },
+    { pattern = "^(%d+)week[s]?$",  unit = "week"  },
+    { pattern = "^(%d+)month[s]?$", unit = "month" },
+    { pattern = "^(%d+)year[s]?$",  unit = "year"  },
+}
+
+local function parse_period(period_str)
+    for _, entry in ipairs(period_patterns) do
+        local n = period_str:match(entry.pattern)
+        if n then
+            return tonumber(n), entry.unit
+        end
+    end
+    return 1, "month"
+end
+
+local function get_period_key(timestamp, period_str)
+    local n, unit = parse_period(period_str)
+    local t = timestamp or os.time()
+
+    if unit == "hour" then
+        return os.date("%Y-%m-%d-%H", t)
+    elseif unit == "day" then
+        return os.date("%Y-%m-%d", t)
+    elseif unit == "week" then
+        return os.date("%Y-W%W", t)
+    elseif unit == "month" then
+        if n == 1 then
+            return os.date("%Y-%m", t)
+        else
+            local year = tonumber(os.date("%Y", t))
+            local month = tonumber(os.date("%m", t))
+            local total_months = (year - 1970) * 12 + (month - 1) + n - 1
+            local base_year = 1970 + math.floor(total_months / 12)
+            local base_month = (total_months % 12) + 1
+            return string.format("%d-%02d", base_year, base_month)
+        end
+    elseif unit == "year" then
+        if n == 1 then
+            return os.date("%Y", t)
+        else
+            local year = tonumber(os.date("%Y", t))
+            return tostring(year + n - 1)
+        end
+    end
+
+    return os.date("%Y-%m", t)
+end
+
+local function parse_duration(duration_str)
+    local n, unit = parse_period(duration_str)
+    local seconds = {
+        hour = 3600,
+        day = 86400,
+        week = 604800,
+        month = 2592000,
+        year = 31536000,
+    }
+    return n * (seconds[unit] or 2592000)
+end
+
+-- ==================== 5.2 Storage 抽象层 ====================
+Storage = {}
+Storage.__index = Storage
+
+function Storage.new(backend)
+    return setmetatable({ backend = backend or "json" }, Storage)
+end
+
+function Storage:load(split_name, period_key)
+    if self.backend == "json" then
+        local path = config_path .. sep .. split_name .. sep .. period_key .. ".json"
+        local f = io.open(path, "r")
+        if not f then return nil end
+        local content = f:read("*a")
+        f:close()
+
+        local data = { period = period_key, total = 0, counts = {}, errors = 0, commits = 0 }
+
+        data.total = tonumber(content:match('"total"%s*:%s*([%d%.]+)')) or 0
+        data.errors = tonumber(content:match('"errors"%s*:%s*(%d+)')) or 0
+        data.commits = tonumber(content:match('"commits"%s*:%s*(%d+)')) or 0
+
+        local counts_block = content:match('"counts"%s*:%s*{([^}]+)}')
+        if counts_block then
+            for k, v in counts_block:gmatch('"([^"]+)"%s*:%s*([%d%.]+)') do
+                data.counts[k] = tonumber(v)
+            end
+        end
+
+        return data
+    end
+    return nil
+end
+
+function Storage:save(split_name, period_key, data)
+    if self.backend == "json" then
+        local dir = config_path .. sep .. split_name
+        make_dir(dir)
+        local path = dir .. sep .. period_key .. ".json"
+
+        local counts_json = {}
+        for k, v in pairs(data.counts) do
+            table.insert(counts_json, string.format('        "%s": %s', k, tostring(v)))
+        end
+
+        local content = string.format([[{
+    "period": "%s",
+    "total": %s,
+    "counts": {
+%s
+    },
+    "errors": %d,
+    "commits": %d
+}]], data.period, tostring(data.total), table.concat(counts_json, ",\n"), data.errors or 0, data.commits or 0)
+
+        local f = io.open(path, "w")
+        if f then f:write(content); f:close() end
+    end
+end
+
+function Storage:cleanup(split_name, retention)
+    if self.backend == "json" then
+        local dir = config_path .. sep .. split_name
+        local duration = parse_duration(retention)
+        local cutoff = os.time() - duration
+
+        local cmd
+        if os_type == "win" then
+            cmd = string.format('forfiles /p "%s" /m "*.json" /d -%d /c "cmd /c del @path" 2>nul', dir, math.ceil(duration / 86400))
+        else
+            cmd = string.format('find "%s" -name "*.json" -mtime +%d -delete 2>/dev/null', dir, math.ceil(duration / 86400))
+        end
+        os.execute(cmd)
+    end
+end
+
+function Storage:list_periods(split_name)
+    local periods = {}
+    local dir = config_path .. sep .. split_name
+    local cmd
+    if os_type == "win" then
+        cmd = string.format('dir "%s" /b /a-d 2>nul', dir)
+    else
+        cmd = string.format('ls -1 "%s" 2>/dev/null', dir)
+    end
+    local p = io.popen(cmd)
+    if p then
+        for line in p:lines() do
+            local period = line:match("^(.+)%.json$")
+            if period then table.insert(periods, period) end
+        end
+        p:close()
+    end
+    table.sort(periods)
+    return periods
 end
 
 -- ==================== 6. 设备同步状态文件 (dev_$machine_id.json) ====================
@@ -517,37 +730,77 @@ local function sync_idle_job()
         state_changed = true
     end
 
+    -- 7. 清理过期分片文件
+    for split_name, retention in pairs(config.state_retention) do
+        storage:cleanup(split_name, retention)
+    end
+
     if state_changed then
         save_state(state)
     end
 end
 
 -- ==================== 9. Rime 回调入口 ====================
+local processor_state = {
+    last_preedit_len = 0,
+    backspace_pressed = false,
+    errors_buffered = 0,
+}
+
 local function on_commit(context)
     local commit_text = context:get_commit_text()
     if commit_text and commit_text ~= "" then
-        -- 计算当前词文本在各 Rate 正则下的匹配数目
         local current_counts = calculate_text_rates(commit_text)
         
-        -- 检查是否有有效计数，防止刷空行
         local has_data = false
         for _, v in pairs(current_counts) do
             if v > 0 then has_data = true break end
         end
 
         if has_data then
-            -- 1. 动态合并入本机当前的 state.json 中（就地加权变动）
             local state = load_state()
             for k, v in pairs(current_counts) do
                 local rate = config.count_rates[k] or 1
                 state.counts[k] = (state.counts[k] or 0) + (v * rate)
             end
+
+            -- 合并退格错误计数
+            state.errors = (state.errors or 0) + processor_state.errors_buffered
+            processor_state.errors_buffered = 0
+
             local total_sum = 0
             for _, v in pairs(state.counts) do total_sum = total_sum + v end
             state.total = total_sum
             save_state(state)
 
-            -- 2. 压入同步队列缓冲区（同步文件里写入的是未加权原始数量 raw_count，供外部消费端根据各自配置折算）
+            -- 写入 state_split 分片
+            local now = os.time()
+            local errors_for_split = state.errors
+            for split_name, period in pairs(config.state_split) do
+                local period_key = get_period_key(now, period)
+                local split_data = storage:load(split_name, period_key) or {
+                    period = period_key,
+                    total = 0,
+                    counts = {},
+                    errors = 0,
+                    commits = 0
+                }
+
+                for k, v in pairs(current_counts) do
+                    local rate = config.count_rates[k] or 1
+                    split_data.counts[k] = (split_data.counts[k] or 0) + (v * rate)
+                end
+                split_data.total = sum_table(split_data.counts)
+                split_data.errors = errors_for_split
+                split_data.commits = (split_data.commits or 0) + 1
+
+                storage:save(split_name, period_key, split_data)
+            end
+
+            -- 重置 state 中的 errors（已写入分片）
+            state.errors = 0
+            save_state(state)
+
             table.insert(commit_buffer, {
                 timestamp = os.date("%Y-%m-%d %H:%M:%S"),
                 counts = current_counts
@@ -558,6 +811,50 @@ local function on_commit(context)
             end
         end
     end
+end
+
+local function word_counter_processor(key, env)
+    local context = env.engine.context
+    local repr = key:repr()
+
+    if repr == "BackSpace" or repr == "Delete" then
+        local preedit = context:get_preedit()
+        local current_len = 0
+        if preedit and preedit.text then
+            current_len = utf8.len(preedit.text)
+        end
+
+        if current_len > 0 then
+            -- preedit 内删除：记录长度差值
+            processor_state.errors_buffered = processor_state.errors_buffered +
+                math.max(0, processor_state.last_preedit_len - current_len)
+        else
+            -- 无 preedit 时的退格/删除：假设删除 1 个已提交字符
+            processor_state.errors_buffered = processor_state.errors_buffered + 1
+        end
+
+        processor_state.last_preedit_len = current_len
+        return 1
+    end
+
+    -- 更新 preedit 长度追踪
+    local preedit = context:get_preedit()
+    if preedit and preedit.text then
+        local current_len = utf8.len(preedit.text)
+        if processor_state.backspace_pressed then
+            -- 退格后的长度变化
+            local delta = processor_state.last_preedit_len - current_len
+            if delta > 0 then
+                processor_state.errors_buffered = processor_state.errors_buffered + delta
+            end
+            processor_state.backspace_pressed = false
+        end
+        processor_state.last_preedit_len = current_len
+    else
+        processor_state.last_preedit_len = 0
+    end
+
+    return 1
 end
 
 function init(env)
@@ -572,6 +869,7 @@ end
 
 return {
     init = init,
+    func = word_counter_processor,
     sync_idle = sync_idle_job,
     _internal = {
         config = config,
@@ -590,5 +888,11 @@ return {
         register_exported_file = register_exported_file,
         get_device_json_files = get_device_json_files,
         device_sync_prefix = device_sync_prefix,
+        get_period_key = get_period_key,
+        parse_period = parse_period,
+        parse_duration = parse_duration,
+        Storage = Storage,
+        storage = function() return storage end,
+        processor_state = processor_state,
     }
 }

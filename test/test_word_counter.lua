@@ -988,6 +988,168 @@ do
     assert_true("本机文件标记已处理", after.processed_files[fname] == true)
 end
 
+-- ----------------------------------------------------------
+print("\n[27] 时间粒度解析")
+-- ----------------------------------------------------------
+do
+    reset_config()
+    I.load_config_file()
+
+    -- parse_period 基本测试
+    local n, unit = I.parse_period("1month")
+    assert_eq("parse_period 1month 数值", n, 1)
+    assert_eq("parse_period 1month 单位", unit, "month")
+
+    n, unit = I.parse_period("3months")
+    assert_eq("parse_period 3months 数值", n, 3)
+    assert_eq("parse_period 3months 单位", unit, "month")
+
+    n, unit = I.parse_period("7days")
+    assert_eq("parse_period 7days 数值", n, 7)
+    assert_eq("parse_period 7days 单位", unit, "day")
+
+    n, unit = I.parse_period("1year")
+    assert_eq("parse_period 1year 数值", n, 1)
+    assert_eq("parse_period 1year 单位", unit, "year")
+
+    n, unit = I.parse_period("2weeks")
+    assert_eq("parse_period 2weeks 数值", n, 2)
+    assert_eq("parse_period 2weeks 单位", unit, "week")
+
+    n, unit = I.parse_period("12hours")
+    assert_eq("parse_period 12hours 数值", n, 12)
+    assert_eq("parse_period 12hours 单位", unit, "hour")
+
+    -- get_period_key 测试
+    local fixed_ts = os.time({year=2025, month=6, day=15, hour=14, min=30, sec=0})
+
+    assert_eq("get_period_key 1month", I.get_period_key(fixed_ts, "1month"), "2025-06")
+    assert_eq("get_period_key 1day", I.get_period_key(fixed_ts, "1day"), "2025-06-15")
+    assert_eq("get_period_key 1hour", I.get_period_key(fixed_ts, "1hour"), "2025-06-15-14")
+    assert_eq("get_period_key 1year", I.get_period_key(fixed_ts, "1year"), "2025")
+
+    -- parse_duration 测试
+    assert_eq("parse_duration 1day", I.parse_duration("1day"), 86400)
+    assert_eq("parse_duration 1month", I.parse_duration("1month"), 2592000)
+    assert_near("parse_duration 1week", I.parse_duration("1week"), 604800, 1)
+end
+
+-- ----------------------------------------------------------
+print("\n[28] Storage JSON 后端")
+-- ----------------------------------------------------------
+do
+    reset_config()
+    I.load_config_file()
+
+    local store = I.Storage.new("json")
+
+    -- 保存和读取
+    local test_data = {
+        period = "2025-06",
+        total = 123.45,
+        counts = { cjk = 100, ascii = 23.45 },
+        errors = 5,
+        commits = 10
+    }
+    store:save("monthly", "2025-06", test_data)
+
+    local loaded = store:load("monthly", "2025-06")
+    assert_true("Storage 读取非 nil", loaded ~= nil)
+    assert_near("Storage 读取 total", loaded.total, 123.45, 0.001)
+    assert_near("Storage 读取 cjk", loaded.counts["cjk"], 100, 0.001)
+    assert_eq("Storage 读取 errors", loaded.errors, 5)
+    assert_eq("Storage 读取 commits", loaded.commits, 10)
+
+    -- 不存在的分片返回 nil
+    local missing = store:load("monthly", "2099-01")
+    assert_true("Storage 不存在返回 nil", missing == nil)
+
+    -- list_periods
+    store:save("monthly", "2025-01", test_data)
+    store:save("monthly", "2025-02", test_data)
+    local periods = store:list_periods("monthly")
+    assert_true("list_periods 包含 2025-01", periods[1] == "2025-01")
+    assert_true("list_periods 包含 2025-02", periods[2] == "2025-02")
+    assert_true("list_periods 包含 2025-06", periods[3] == "2025-06")
+end
+
+-- ----------------------------------------------------------
+print("\n[29] config state_split 配置解析")
+-- ----------------------------------------------------------
+do
+    reset_config()
+
+    local custom_config = [[{
+    "machine_id": "test-split-001",
+    "sync_dir": "$config_path/sync",
+    "commit_threshold": 32,
+    "history_threshold": 16,
+    "count_rates": { "cjk": 1, "ascii": 0.33 },
+    "state_split": {
+        "monthly": "1month",
+        "daily": "1day"
+    },
+    "state_retention": {
+        "monthly": "24months",
+        "daily": "90days"
+    }
+}]]
+    write_file(config_path .. sep .. "config.json", custom_config)
+    I.load_config_file()
+
+    assert_eq("state_split monthly", I.config.state_split["monthly"], "1month")
+    assert_eq("state_split daily", I.config.state_split["daily"], "1day")
+    assert_eq("state_retention monthly", I.config.state_retention["monthly"], "24months")
+    assert_eq("state_retention daily", I.config.state_retention["daily"], "90days")
+end
+
+-- ----------------------------------------------------------
+print("\n[30] state.json 包含 errors 字段")
+-- ----------------------------------------------------------
+do
+    reset_config()
+    I.load_config_file()
+
+    local state = I.load_state()
+    assert_eq("初始 errors 为 0", state.errors, 0)
+
+    state.errors = 42
+    state.counts["cjk"] = 10
+    state.total = 10
+    I.save_state(state)
+
+    local reloaded = I.load_state()
+    assert_eq("持久化 errors", reloaded.errors, 42)
+end
+
+-- ----------------------------------------------------------
+print("\n[31] processor_state 退格检测")
+-- ----------------------------------------------------------
+do
+    reset_config()
+    I.load_config_file()
+
+    local ps = I.processor_state
+    -- 初始状态
+    assert_eq("初始 last_preedit_len", ps.last_preedit_len, 0)
+    assert_eq("初始 errors_buffered", ps.errors_buffered, 0)
+
+    -- 模拟退格前状态
+    ps.last_preedit_len = 5
+    ps.errors_buffered = 0
+
+    -- 模拟退格后 preedit 缩短到 3（删除 2 字符）
+    local delta = ps.last_preedit_len - 3
+    ps.errors_buffered = ps.errors_buffered + delta
+    ps.last_preedit_len = 3
+
+    assert_eq("退格后 errors_buffered", ps.errors_buffered, 2)
+
+    -- 模拟无 preedit 时退格（删除已提交文本）
+    ps.errors_buffered = ps.errors_buffered + 1
+    assert_eq("无 preedit 退格后 errors_buffered", ps.errors_buffered, 3)
+end
+
 -- ==================== 测试结果汇总 ====================
 print("\n" .. string.rep("=", 60))
 print(" 测试结果汇总")

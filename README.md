@@ -5,6 +5,8 @@
 ## 功能特性
 
 - 实时统计 CJK 汉字、ASCII 字符及自定义正则匹配的加权字数
+- 退格/删除键字符删除计数（错误率统计）
+- 按时间粒度分片存储（月度、日度、自定义周期）
 - 跨平台支持（Windows / macOS / Linux）
 - 多设备通过共享文件夹自动同步字数数据
 - 滑动窗口自动清理历史同步文件
@@ -53,6 +55,14 @@ patch:
     "count_rates": {
         "cjk": 1,
         "ascii": 0.33
+    },
+    "state_split": {
+        "monthly": "1month",
+        "daily": "1day"
+    },
+    "state_retention": {
+        "monthly": "24months",
+        "daily": "90days"
     }
 }
 ```
@@ -66,6 +76,8 @@ patch:
 | `commit_threshold` | `32` | 每累计多少次上屏触发一次同步文件导出 |
 | `history_threshold` | `16` | 闲时清理时保留的最大历史快照数 |
 | `count_rates` | 见下方 | 多维度加权统计规则 |
+| `state_split` | `{}` | 按时间粒度分片存储的配置，键为分片名称，值为时间粒度 |
+| `state_retention` | `{}` | 各分片的保留期限，超期文件自动清理 |
 
 ### count_rates 权重配置
 
@@ -88,6 +100,61 @@ patch:
 
 上例含义：汉字按原数统计；ASCII 按 1/3 折算；连续数字按组计数，每组权重 2；连续元音按组计数，每组权重 0.5。
 
+### state_split 时间分片
+
+按时间粒度分片存储统计数据，便于查看历史趋势。支持的时间粒度：
+
+| 格式 | 含义 | 示例 |
+|------|------|------|
+| `Nhour[s]` | 小时 | `1hour`、`12hours` |
+| `Nday[s]` | 天 | `1day`、`7days` |
+| `Nweek[s]` | 周 | `1week`、`4weeks` |
+| `Nmonth[s]` | 月 | `1month`、`3months` |
+| `Nyear[s]` | 年 | `1year` |
+
+示例配置：
+
+```json
+"state_split": {
+    "monthly": "1month",
+    "daily": "1day"
+}
+```
+
+每个分片存储在 `config_path/<分片名>/` 目录下，文件名为对应的时间段标识（如 `2025-06.json`、`2025-06-15.json`）。
+
+分片文件结构：
+
+```json
+{
+    "period": "2025-06",
+    "total": 1234.56,
+    "counts": { "cjk": 1000, "ascii": 234.56 },
+    "errors": 42,
+    "commits": 156
+}
+```
+
+### state_retention 保留期限
+
+控制各分片的历史数据保留时长，超期文件在闲时同步时自动清理：
+
+```json
+"state_retention": {
+    "monthly": "24months",
+    "daily": "90days"
+}
+```
+
+### 错误率统计
+
+插件通过 `lua_processor` 检测退格键（BackSpace）和删除键（Delete）操作，统计字符删除次数：
+
+- **preedit 内删除**：输入过程中未确认的字符删除，精确统计删除的字符数
+- **已提交文本删除**：光标左移删除已确认的文本，近似统计（每次退格计 1 次）
+
+错误数据存储在 `state.json` 的 `errors` 字段中，并同步写入各时间分片文件。
+
 ## 多设备同步
 
 将多台设备的系统配置目录下的 `milk-word-counter/sync/` 目录通过网盘、局域网共享等方式保持同步即可。
@@ -105,6 +172,10 @@ patch:
 milk-word-counter/
 ├── config.json                              # 插件配置
 ├── state.json                               # 本地累计字数状态
+├── monthly/                                 # 月度分片数据
+│   └── 2025-06.json
+├── daily/                                   # 日度分片数据
+│   └── 2025-06-15.json
 └── sync/
     ├── dev_<本机 machine_id>.json            # 本机同步状态
     ├── dev_<其他设备 machine_id>.json        # 其他设备同步状态
